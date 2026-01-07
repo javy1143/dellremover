@@ -1,69 +1,86 @@
 # ==============================================================================
-# MASTER DELL BLOATWARE REMOVAL SCRIPT v4.0 (GHOST HUNTER)
-# TARGETS: Stubborn Control Panel entries and leftover Start Menu shortcuts.
+# MASTER DELL BLOATWARE REMOVAL SCRIPT v5.0
+# TARGETS: Peripheral Manager, Display Manager, Core Services, & Ghost Icons
 # ==============================================================================
 
 $ErrorActionPreference = "SilentlyContinue"
 
-# 1. DEFINE TARGETS (Control Panel names)
-$Targets = @(
-    "Dell Pair", "Dell CinemaColor", "SupportAssist", 
-    "Dell Digital Delivery", "Dell Customer Connect", "My Dell", "Fusion Service"
-)
+# 1. STOP & KILL PERIPHERAL PROCESSES
+Write-Host "--- Stopping Peripheral & Display Manager Processes ---" -ForegroundColor Cyan
+$KillList = @("DDPM", "DellPeripheralManager", "PeripheralCore", "dpm-service", "msiexec", "setup")
+foreach ($Proc in $KillList) {
+    Get-Process | Where-Object { $_.Name -like "*$Proc*" } | Stop-Process -Force
+}
 
-# 2. CLEAR CONTROL PANEL "GHOST" ENTRIES (Registry Nuke)
-Write-Host "--- Clearing Control Panel Ghost Entries ---" -ForegroundColor Cyan
+# 2. DISABLE SERVICES (Crucial for Peripheral Core)
+Write-Host "--- Disabling Core Services ---" -ForegroundColor Cyan
+$SvcList = @("DDPMService", "DellPeripheralManagerService", "PeripheralCoreService", "FusionService", "dcubsvc")
+foreach ($Svc in $SvcList) {
+    Set-Service -Name $Svc -StartupType Disabled
+    Stop-Service -Name $Svc -Force
+}
+
+# 3. COMPREHENSIVE REGISTRY UNINSTALL (Broader Wildcards)
+Write-Host "--- Uninstalling via Registry ---" -ForegroundColor Cyan
 $RegPaths = @(
-    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
-    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+    "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
 )
 
-foreach ($Path in $RegPaths) {
-    if (Test-Path $Path) {
-        Get-ChildItem -Path $Path | ForEach-Object {
-            $Key = $_
-            $DisplayName = (Get-ItemProperty -Path $Key.PSPath).DisplayName
-            
-            foreach ($Target in $Targets) {
-                if ($DisplayName -like "*$Target*") {
-                    Write-Host "Removing Registry Entry: $DisplayName" -ForegroundColor Yellow
-                    Remove-Item -Path $Key.PSPath -Recurse -Force
-                }
-            }
-        }
+# Added "Display" and "Peripheral" to the match list
+$Targets = @("*Dell*Display*", "*Dell*Peripheral*", "*SupportAssist*", "*CinemaColor*", "*Dell*Pair*", "*Fusion*")
+
+$Apps = Get-ItemProperty $RegPaths | Where-Object { 
+    $DisplayName = $_.DisplayName
+    foreach ($T in $Targets) { if ($DisplayName -like $T) { return $true } }
+    return $false
+}
+
+foreach ($App in $Apps) {
+    Write-Host "Uninstalling: $($App.DisplayName)" -ForegroundColor Yellow
+    if ($App.UninstallString -match "msiexec") {
+        $Guid = ([regex]::Match($App.UninstallString, '{.*}')).Value
+        Start-Process "msiexec.exe" -ArgumentList "/x $Guid /qn /norestart" -Wait
+    } else {
+        $Cmd = $App.UninstallString -replace '/I','/X'
+        Start-Process cmd.exe -ArgumentList "/c $Cmd /S /quiet /verysilent" -Wait
     }
 }
 
-# 3. DELETE START MENU SHORTCUTS
-Write-Host "--- Cleaning Start Menu Shortcuts ---" -ForegroundColor Cyan
-$ShortcutPaths = @(
+# 4. TARGETED UWP REMOVAL (Peripheral Manager Store Version)
+Write-Host "--- Removing Appx Packages ---" -ForegroundColor Cyan
+$UWPList = @("*DellDisplayManager*", "*DellPeripheralManager*", "*DellInc*")
+foreach ($Package in $UWPList) {
+    Get-AppxPackage -Name $Package -AllUsers | Remove-AppxPackage -AllUsers
+    Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -like $Package } | Remove-AppxProvisionedPackage -Online
+}
+
+# 5. SCRUB SHORTCUTS & FOLDERS
+Write-Host "--- Cleaning Start Menu & Program Files ---" -ForegroundColor Cyan
+$PathsToScrub = @(
     "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
-    "$env:AppData\Microsoft\Windows\Start Menu\Programs"
+    "$env:AppData\Microsoft\Windows\Start Menu\Programs",
+    "$env:ProgramData\Dell",
+    "$env:ProgramFiles\Dell",
+    "$env:ProgramFiles (x86)\Dell"
 )
 
-foreach ($SPath in $ShortcutPaths) {
-    if (Test-Path $SPath) {
-        # Find any shortcuts with "Dell" or "CinemaColor" or "Pair" in the name
-        Get-ChildItem -Path $SPath -Recurse -Include "*.lnk", "*.url" | Where-Object {
-            $_.Name -like "*Dell*" -or $_.Name -like "*CinemaColor*" -or $_.Name -like "*Pair*"
-        } | ForEach-Object {
-            Write-Host "Deleting Shortcut: $($_.FullName)" -ForegroundColor Red
-            Remove-Item -Path $_.FullName -Force
-        }
-        
-        # Also check for Dell-specific folders in the Start Menu
-        Get-ChildItem -Path $SPath -Directory | Where-Object { $_.Name -like "*Dell*" } | ForEach-Object {
-            Write-Host "Deleting Folder: $($_.FullName)" -ForegroundColor Red
-            Remove-Item -Path $_.FullName -Recurse -Force
+foreach ($Path in $PathsToScrub) {
+    if (Test-Path $Path) {
+        # Delete Shortcuts
+        Get-ChildItem -Path $Path -Recurse -Include "*.lnk", "*.url" | Where-Object { $_.Name -like "*Dell*" } | Remove-Item -Force
+        # Force Delete Folders
+        if ($Path -like "*\Dell") {
+            cmd /c "takeown /f `"$Path`" /r /d y"
+            cmd /c "icacls `"$Path`" /grant administrators:F /t /q"
+            Remove-Item -Path $Path -Recurse -Force
         }
     }
 }
 
-# 4. RESET THE START MENU CACHE (Forces Windows to refresh the icons)
-Write-Host "--- Refreshing Explorer Cache ---" -ForegroundColor Cyan
-Stop-Process -Name explorer -Force
-Start-Sleep -Seconds 2
-Start-Process explorer
+# 6. REFRESH SHELL (Fixes Start Menu Visuals)
+Write-Host "--- Refreshing UI ---" -ForegroundColor Green
+Stop-Process -Name explorer -Force # Explorer restarts automatically
 
-Write-Host "Ghost entries and shortcuts cleared." -ForegroundColor Green
+Write-Host "Script Complete. All Dell Peripheral components have been targeted." -ForegroundColor White
